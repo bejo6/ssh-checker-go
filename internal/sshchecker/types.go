@@ -24,7 +24,7 @@ type TimeStats struct {
 
 type SSHResult struct {
 	LiveHosts []Host
-	ValidLogins []DataLogin
+	ValidLogins map[string]DataLogin
 	TimeStats TimeStats
 }
 
