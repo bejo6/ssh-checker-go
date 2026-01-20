@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 	"strings"
+	"crypto/md5"
 	"encoding/json"
 	"ssh-checker/internal/config"
 	"ssh-checker/internal/utils"
@@ -15,7 +16,7 @@ import (
 func NewSSHChecker() *SSHResult {
 	return &SSHResult{
 		LiveHosts:   []Host{},
-		ValidLogins: []DataLogin{},
+		ValidLogins: make(map[string]DataLogin),
 	}
 }
 
@@ -45,17 +46,7 @@ func (s *SSHResult) Run() {
 		os.Exit(0)
 	}
 
-	if config.FormattedOutput == "json" || config.FormattedOutput == "all" {
-		if err := s.SaveToJSON(); err != nil {
-			fmt.Println("Error saving results to JSON:", err)
-		}
-	}
-
-	if config.FormattedOutput == "text" || config.FormattedOutput == "all" {
-		if err := s.SaveToText(); err != nil {
-			fmt.Println("Error saving results to text file:", err)
-		}
-	}
+	s.SaveToFile()
 }
 
 func (s *SSHResult) runCheckLive() {
@@ -94,7 +85,6 @@ func (s *SSHResult) runCheckLogin() {
 
 	if totalLogins >= MaxLoginAttempts {
 		usePool = true
-		config.AppConfig.SSHDelayMs = 400
 	}
 
 	if config.AppConfig.SSHDelayMs > 0 {
@@ -242,13 +232,19 @@ func (s *SSHResult) CheckValidLogins() {
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
+			lKey := loginKey(dl)
+			if _, exists := s.ValidLogins[lKey]; exists {
+				return
+			}
 			success, err := CheckSshLogin(dl)
 			if success {
 				fmt.Printf("[+] Valid login found: %s@%s:%s with password: %s\n",
 					dl.User, dl.Address, dl.Port, dl.Password)
 
 				mu.Lock()
-				s.ValidLogins = append(s.ValidLogins, dl)
+				s.ValidLogins[lKey] = dl
+				// save temporary data to file
+				saveLogin(dl)
 				mu.Unlock()
 			} else {
 				if config.LogDebug {
@@ -318,6 +314,10 @@ func (s *SSHResult) CheckValidLoginsWithDelay() {
 			lock <- struct{}{} // acquire host
 			defer func() { <-lock }() // release
 
+			lKey := loginKey(dl)
+			if _, exists := s.ValidLogins[lKey]; exists {
+				return
+			}
 			success, err := CheckSshLogin(dl)
 
 			time.Sleep(delay) // delay before next attempt to same host
@@ -327,7 +327,9 @@ func (s *SSHResult) CheckValidLoginsWithDelay() {
 					dl.User, dl.Address, dl.Port, dl.Password)
 
 				mu.Lock()
-				s.ValidLogins = append(s.ValidLogins, dl)
+				s.ValidLogins[lKey] = dl
+				// save temporary data to file
+				saveLogin(dl)
 				mu.Unlock()
 			} else {
 				if config.LogDebug {
@@ -365,6 +367,13 @@ func (s *SSHResult) CheckValidLoginsWithWorkerPool() {
 	for i := 0; i < workerCount; i++ {
 		go func(id int) {
 			for dl := range jobs {
+				lKey := loginKey(dl)
+				if _, exists := s.ValidLogins[lKey]; exists {
+					// already found
+					wg.Done()
+					continue
+				}
+
 				success, err := CheckSshLogin(dl)
 
 				if success {
@@ -372,7 +381,9 @@ func (s *SSHResult) CheckValidLoginsWithWorkerPool() {
 						dl.User, dl.Address, dl.Port, dl.Password)
 
 					mu.Lock()
-					s.ValidLogins = append(s.ValidLogins, dl)
+					s.ValidLogins[lKey] = dl
+					// save temporary data to file
+					saveLogin(dl)
 					mu.Unlock()
 				} else {
 					if config.LogDebug {
@@ -435,6 +446,14 @@ func (s *SSHResult) CheckValidLoginsWithWorkerPoolAndDelay() {
 	for i := 0; i < workerCount; i++ {
 		go func(id int) {
 			for dl := range jobs {
+				lKey := loginKey(dl)
+				if _, exists := s.ValidLogins[lKey]; exists {
+					// already found
+					wg.Done()
+					continue
+				}
+
+				// per-host serialization
 				hKey := hostKey(dl)
 				lock := getHostLock(hKey)
 
@@ -448,7 +467,9 @@ func (s *SSHResult) CheckValidLoginsWithWorkerPoolAndDelay() {
 						dl.User, dl.Address, dl.Port, dl.Password)
 
 					mu.Lock()
-					s.ValidLogins = append(s.ValidLogins, dl)
+					s.ValidLogins[lKey] = dl
+					// save temporary data to file
+					saveLogin(dl)
 					mu.Unlock()
 				} else {
 					if config.LogDebug {
@@ -491,7 +512,7 @@ func (s *SSHResult) SaveToJSON() error {
 
 	// prepare new data
 	for _, login := range s.ValidLogins {
-		hostKey := fmt.Sprintf("%s:%s:%s:%s", login.Address, login.Port, login.User, login.Password)
+		hostKey := loginKey(login)
 		if _, exists := existingData[hostKey]; !exists {
 			existingData[hostKey] = login
 		}
@@ -510,6 +531,25 @@ func (s *SSHResult) SaveToJSON() error {
 	return nil
 }
 
+func (s *SSHResult) SaveToFile() error {
+	if config.FormattedOutput == "json" || config.FormattedOutput == "all" {
+		if err := s.SaveToJSON(); err != nil {
+			fmt.Println("Error saving results to JSON:", err)
+		}
+		if config.FormattedOutput == "all" {
+			if err := s.SaveToText(); err != nil {
+				fmt.Println("Error saving results to text file:", err)
+			}
+		}
+	} else if config.FormattedOutput == "text" {
+		if err := s.SaveToText(); err != nil {
+			fmt.Println("Error saving results to text file:", err)
+		}
+	}
+
+	return nil
+}
+
 func (s *SSHResult) SaveToText() error {
 	filePath := OutputName + ".txt"
 	var lines []string
@@ -520,9 +560,15 @@ func (s *SSHResult) SaveToText() error {
 		lines = append(lines, line)
 	}
 
-	// write to file
 	dataToWrite := strings.Join(lines, "\n")
-	if err := os.WriteFile(filePath, []byte(dataToWrite), 0644); err != nil {
+	// save append mode
+	f, err := os.OpenFile(filePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	if _, err := f.WriteString(dataToWrite + "\n"); err != nil {
 		return err
 	}
 
@@ -534,30 +580,34 @@ func (s *SSHResult) AddLiveHost(host Host) {
 	s.LiveHosts = append(s.LiveHosts, host)
 }
 
-func (s *SSHResult) mappingDataLogin() []DataLogin {
+func (s *SSHResult) mappingDataLogin() map[string]DataLogin {
 	if config.LogDebug {
 		fmt.Println("[*] Mapping login combinations...")
 	}
 
-	var dataLogins []DataLogin
+	var mapDataLogin = make(map[string]DataLogin)
 
 	for _, password := range config.AppConfig.Password {
 		for _, user := range config.AppConfig.User {
 			for _, host := range s.LiveHosts {
-				dataLogins = append(dataLogins, DataLogin{
+				dataLogin := DataLogin{
 					Host:     host,
 					User:     user,
 					Password: password,
-				})
+				}
+				key := loginKeyWithPassword(dataLogin)
+				if _, exists := mapDataLogin[key]; !exists {
+					mapDataLogin[key] = dataLogin
+				}
 			}
 		}
 	}
 
 	if config.LogDebug {
-		fmt.Println("[*] Total combinations of login to check:", len(dataLogins))
+		fmt.Println("[*] Total combinations of login to check:", len(mapDataLogin))
 	}
 
-	return dataLogins
+	return mapDataLogin
 }
 
 func (s *SSHResult) printTimeStats() {
@@ -618,4 +668,89 @@ func mappingHosts() map[string]Host {
 
 func hostKey(dl DataLogin) string {
 	return dl.Address + ":" + dl.Port
+}
+
+func loginKey(dl DataLogin) string {
+	hostKey := fmt.Sprintf("%s:%s:%s", dl.Address, dl.Port, dl.User)
+	return fmt.Sprintf("%x", md5.Sum([]byte(hostKey)))
+}
+
+func loginKeyWithPassword(dl DataLogin) string {
+	hostKey := fmt.Sprintf("%s:%s:%s:%s", dl.Address, dl.Port, dl.User, dl.Password)
+	return fmt.Sprintf("%x", md5.Sum([]byte(hostKey)))
+}
+
+func saveLogin(dataLogin DataLogin) error {
+	if config.FormattedOutput == "json" || config.FormattedOutput == "all" {
+		if err := saveLoginToJSON(dataLogin); err != nil {
+			return err
+		}
+
+		if config.FormattedOutput == "all" {
+			if err := saveLoginToText(dataLogin); err != nil {
+				return err
+			}
+		}
+	} else if config.FormattedOutput == "text" {
+		if err := saveLoginToText(dataLogin); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func saveLoginToJSON(dataLogin DataLogin) error {
+	filePath := OutputName + ".json"
+	var existingData = make(map[string]DataLogin)
+
+	// if file exists, read existing data
+	if _, err := os.Stat(filePath); err == nil {
+		fileContent, err := os.ReadFile(filePath)
+		if err != nil {
+			return err
+		}
+		if err := json.Unmarshal(fileContent, &existingData); err != nil {
+			return err
+		}
+	}
+
+	hashKey := loginKey(dataLogin)
+	if _, exists := existingData[hashKey]; !exists {
+		existingData[hashKey] = dataLogin
+	}
+
+	dataToWrite, err := json.MarshalIndent(existingData, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(filePath, dataToWrite, 0644); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func saveLoginToText(dataLogin DataLogin) error {
+	filePath := OutputName + ".txt"
+	
+	// save append mode
+	f, err := os.OpenFile(filePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	line := fmt.Sprintf(
+		"%s:%s | %s | %s\n",
+		dataLogin.Address,
+		dataLogin.Port,
+		dataLogin.User,
+		dataLogin.Password,
+	)
+	if _, err := f.WriteString(line); err != nil {
+		return err
+	}
+
+	return nil
 }
