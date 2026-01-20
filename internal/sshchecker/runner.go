@@ -63,6 +63,9 @@ func (s *SSHResult) runCheckLive() {
 	if config.AppConfig.WorkersCount > 0 || config.AppConfig.WorkersLiveCheck > 0 {
 		usePool = true
 	}
+	if config.AppConfig.WorkersCount > 0 && config.AppConfig.WorkersLiveCheck <= 0 {
+		config.AppConfig.WorkersLiveCheck = config.AppConfig.WorkersCount
+	}
 	if len(s.LiveHosts) >= MaxLiveHosts {
 		usePool = true
 	}
@@ -80,6 +83,9 @@ func (s *SSHResult) runCheckLogin() {
 	usePool := false
 	if config.AppConfig.WorkersCount > 0 || config.AppConfig.WorkersLoginCheck > 0 {
 		usePool = true
+	}
+	if config.AppConfig.WorkersCount > 0 && config.AppConfig.WorkersLoginCheck <= 0 {
+		config.AppConfig.WorkersLoginCheck = config.AppConfig.WorkersCount
 	}
 
 	totalLogins := len(s.LiveHosts) *
@@ -345,7 +351,7 @@ func (s *SSHResult) CheckValidLoginsWithWorkerPool() {
 
 	fmt.Println("[*] Checking SSH logins (worker pool)...")
 
-	workerCount := config.AppConfig.WorkersCount
+	workerCount := config.AppConfig.WorkersLoginCheck
 	if workerCount < 5 {
 		workerCount = 10
 	}
@@ -396,7 +402,7 @@ func (s *SSHResult) CheckValidLoginsWithWorkerPoolAndDelay() {
 
 	fmt.Println("[*] Checking SSH logins (worker pool + per-host rate limit)...")
 
-	workerCount := config.AppConfig.WorkersCount
+	workerCount := config.AppConfig.WorkersLoginCheck
 	if workerCount < 5 {
 		workerCount = 10
 	}
@@ -534,9 +540,9 @@ func (s *SSHResult) mappingDataLogin() []DataLogin {
 
 	var dataLogins []DataLogin
 
-	for _, host := range s.LiveHosts {
+	for _, password := range config.AppConfig.Password {
 		for _, user := range config.AppConfig.User {
-			for _, password := range config.AppConfig.Password {
+			for _, host := range s.LiveHosts {
 				dataLogins = append(dataLogins, DataLogin{
 					Host:     host,
 					User:     user,
