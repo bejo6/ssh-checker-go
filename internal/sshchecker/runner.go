@@ -94,6 +94,7 @@ func (s *SSHResult) runCheckLogin() {
 
 	if totalLogins >= MaxLoginAttempts {
 		usePool = true
+		config.AppConfig.SSHDelayMs = 400
 	}
 
 	if config.AppConfig.SSHDelayMs > 0 {
