@@ -59,7 +59,15 @@ func ParseFlags() {
 		config.AppConfig.Hosts = hosts
 	}
 
-	if *port != "" {
+	if *portFile != "" {
+		ports, err := getPortsFromFile(*portFile)
+		if err != nil {
+			fmt.Println("Error reading ports from file:", err)
+			os.Exit(1)
+		} else {
+			config.AppConfig.Port = ports
+		}
+	}else if *port != "" {
 		ports := strings.Split(*port, ",")
 		normalizedPorts, err := utils.NormalizePorts(ports)
 		if err != nil {
@@ -67,13 +75,6 @@ func ParseFlags() {
 			os.Exit(1)
 		}
 		config.AppConfig.Port = normalizedPorts
-	} else if *portFile != "" {
-		ports, err := getPortsFromFile(*portFile)
-		if err != nil {
-			fmt.Println("Error reading ports from file:", err)
-		} else {
-			config.AppConfig.Port = ports
-		}
 	}
 
 	if len(config.AppConfig.Port) == 0 {
