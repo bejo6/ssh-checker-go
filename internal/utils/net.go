@@ -91,7 +91,7 @@ func NormalizePorts(ports []string) ([]string, error) {
 	var mapPorts = make(map[string]bool)
 	var validPorts []string
 
-	pattern := regexp.MustCompile(`^\d{1,5}$`)
+	pattern := regexp.MustCompile(`[^0-9]+`)
 
 	for _, port := range ports {
 		portNum := pattern.ReplaceAllString(port, "")
@@ -100,9 +100,9 @@ func NormalizePorts(ports []string) ([]string, error) {
 		}
 
 		if p, err := strconv.Atoi(portNum); err == nil && p > 0 && p <= 65535 {
-			if !mapPorts[port] {
-				validPorts = append(validPorts, port)
-				mapPorts[port] = true
+			if !mapPorts[portNum] {
+				validPorts = append(validPorts, portNum)
+				mapPorts[portNum] = true
 			}
 		}
 	}
